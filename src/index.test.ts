@@ -117,3 +117,42 @@ describe('petSettingsSection', () => {
     expect(section.petId).toBe('doro')
   })
 })
+
+describe('petSettingsSection display persistence', () => {
+  /** The layout a user dragged the pet to, as its own pet.json holds it. */
+  const dragged = { visible: true, size: 160, right: 1428, bottom: 167, bubbleScale: 1 }
+
+  it('user keeps the dragged position when the profile never committed one', () => {
+    // Given a pet.json holding the layout the pet was dragged to
+    // And a row config that never set the display fields, so they read back as
+    // the schema defaults (the bottom-right corner)
+    // When the plugin starts and resolves its active settings
+    const section = petSettingsSection(Config({}), 'ouo-neko', dragged)
+    // Then the dragged layout stands instead of snapping back to those defaults
+    expect(section).toMatchObject({ right: 1428, bottom: 167 })
+  })
+
+  it('user commits a display field and the profile value outranks the persisted one', () => {
+    // Given a dragged layout and a profile layer that committed a right inset
+    const section = petSettingsSection(Config({}), 'ouo-neko', dragged, { right: 48 })
+    // Then the explicit choice wins and the untouched field keeps the dragged one
+    expect(section).toMatchObject({ right: 48, bottom: 167 })
+  })
+
+  it('user commits the schema default and the choice is not mistaken for unset', () => {
+    // Given a dragged layout and a profile layer that committed the default inset
+    const section = petSettingsSection(Config({}), 'ouo-neko', dragged, { right: 24 })
+    // Then the explicit (default-valued) choice stands over the persisted one
+    expect(section.right).toBe(24)
+  })
+
+  it('user commits a layout at runtime and the result outranks the persisted one', () => {
+    // Given a live reference the Host committed into the running config
+    const resolved = Config({})
+    commitLive(resolved.right, 500)
+    // When the plugin resolves the section against an older persisted layout
+    const section = petSettingsSection(resolved, 'ouo-neko', dragged)
+    // Then the live commit wins and the persisted value fills the other fields
+    expect(section).toMatchObject({ right: 500, bottom: 167 })
+  })
+})

@@ -16,10 +16,10 @@ import { Context, type Volatile } from '@deepseek-ai/cordis'
 import type {} from '@deepseek-ai/dsh-settings'
 import type {} from '@deepseek-ai/dsh-host-webserver'
 import z from '@deepseek-ai/schemastery'
-import { PetService, type PetConfig, type PetSettingsSection } from './service.ts'
+import { PET_SETTINGS_NAMESPACE, PetService, type PetConfig, type PetSettingsSection } from './service.ts'
 import { makePetRoutes } from './routes.ts'
 import { loadPetRegistry, petPackageRoot } from './registry.ts'
-import { BUBBLE_SCALE_MAX, BUBBLE_SCALE_MIN, DEFAULT_PET_ID, DISPLAY_INSET_MAX, DISPLAY_SIZE_MAX, DISPLAY_SIZE_MIN } from './persist.ts'
+import { BUBBLE_SCALE_MAX, BUBBLE_SCALE_MIN, DEFAULT_PET_ID, DISPLAY_INSET_MAX, DISPLAY_SIZE_MAX, DISPLAY_SIZE_MIN, type PetDisplayConfig } from './persist.ts'
 import { mountOnce } from './mount-once.ts'
 
 export { PetService, MAX_SESSION_BUBBLES } from './service.ts'
@@ -204,25 +204,111 @@ function readLive<T>(field: LiveField<T> | undefined, fallback: T): T {
 }
 
 /**
+ * Resolve one display field of the section. The precedence is deliberate:
+ *
+ * 1. an explicit profile value (`committed`) — the user's own choice, and the
+ *    only signal that carries a value equal to the schema default on purpose;
+ * 2. a live value the row committed at runtime, i.e. one that differs from the
+ *    schema default, which is all an untouched field ever resolves to;
+ * 3. what the pet's own `pet.json` already holds (`persisted`), so a field the
+ *    profile never touched keeps the position the user dragged instead of
+ *    snapping back to the schema default on the next mount.
+ *
+ * Step 3 is what makes a drag survive a restart. The display fields carry
+ * schema defaults (`right: 24`, `bottom: 20` — the bottom-right corner), and a
+ * config that never set them reads back exactly like one that set them to the
+ * defaults, so without `persisted` the startup section resets the layout every
+ * time the profile commits none — which is what an aggregate install does.
+ * @param key - the display field to resolve.
+ * @param live - the row config's own field, absent when the entry declares none.
+ * @param persisted - the display the pet already shows (its own `pet.json`).
+ * @param committed - the profile layer's explicit display values, when known.
+ * @returns the value the pet runs with.
+ */
+function displayField<K extends keyof PetDisplayConfig>(
+  key: K,
+  live: LiveField<PetDisplayConfig[K]> | undefined,
+  persisted: Partial<PetDisplayConfig>,
+  committed: Partial<PetDisplayConfig>,
+): PetDisplayConfig[K] {
+  const explicit = committed[key]
+  if (explicit !== undefined) return explicit
+  const value = readLive<PetDisplayConfig[K]>(live, PET_FORM_DEFAULTS[key])
+  if (value !== PET_FORM_DEFAULTS[key]) return value
+  const kept = persisted[key]
+  return kept === undefined ? value : kept
+}
+
+/**
  * The settings section the pet runs with: the effective values of the row's
  * own config. `fallbackPetId` covers a mount whose config names no pet at all
  * (a direct mount outside a Loader) — under a Loader the schema default is
  * always present, so the persisted selection stands whenever the config
- * carries it.
+ * carries it. `persisted` and `committed` give the display fields the same
+ * treatment; see {@link displayField}.
  * @param config - the effective config of the pet row.
  * @param fallbackPetId - pet id to use when the config names none.
+ * @param persisted - the display the pet already shows (its own `pet.json`).
+ * @param committed - the profile layer's explicit display values, when known.
  * @returns the resolved settings section.
  */
-export function petSettingsSection(config: PetFormConfig, fallbackPetId: string): PetSettingsSection {
+export function petSettingsSection(
+  config: PetFormConfig,
+  fallbackPetId: string,
+  persisted: Partial<PetDisplayConfig> = {},
+  committed: Partial<PetDisplayConfig> = {},
+): PetSettingsSection {
   return {
-    visible: readLive(config.visible, PET_FORM_DEFAULTS.visible),
-    size: readLive(config.size, PET_FORM_DEFAULTS.size),
-    right: readLive(config.right, PET_FORM_DEFAULTS.right),
-    bottom: readLive(config.bottom, PET_FORM_DEFAULTS.bottom),
-    bubbleScale: readLive(config.bubbleScale, PET_FORM_DEFAULTS.bubbleScale),
+    visible: displayField('visible', config.visible, persisted, committed),
+    size: displayField('size', config.size, persisted, committed),
+    right: displayField('right', config.right, persisted, committed),
+    bottom: displayField('bottom', config.bottom, persisted, committed),
+    bubbleScale: displayField('bubbleScale', config.bubbleScale, persisted, committed),
     petId: readLive(config.petId, fallbackPetId),
     enabled: readLive(config.enabled, PET_FORM_DEFAULTS.enabled),
     decorationEnabled: readLive(config.decorationEnabled, PET_FORM_DEFAULTS.decorationEnabled),
+  }
+}
+
+/** The settings row ids a pet install is served under, most specific first. */
+const PET_SETTINGS_ROW_IDS: readonly string[] = ['web-ui-pet', 'ui-pet', PET_SETTINGS_NAMESPACE]
+
+/**
+ * The fields this host half reads off one settings descriptor. The settings
+ * service serves one descriptor per plugin row (see `describe`), and a plugin's
+ * own config IS its settings page, so the two that matter here are the row's
+ * namespace and the profile layer's explicit values.
+ */
+interface ServedSettingsRow {
+  /** The profile entry's id, which is also this plugin's settings namespace. */
+  ns: string
+  /** The profile layer's explicit values; absent fields were never committed. */
+  user?: Partial<PetDisplayConfig>
+}
+
+/**
+ * The settings row serving this plugin's own config, or undefined when the
+ * settings service is not mounted (a direct mount) or serves no row for the pet.
+ *
+ * Every settings write has to address this row's id, and that id is not the
+ * package's plugin name: an aggregate bundle renames child rows (`pet` becomes
+ * `web-ui-pet`). The browser half resolves the same id through its own
+ * `servedEntryId`, so both halves write to one namespace.
+ * @param ctx - the plugin's context.
+ * @returns the serving row, when there is one.
+ */
+function servedRow(ctx: Context): ServedSettingsRow | undefined {
+  try {
+    const settings = ctx.get('settings', false) as { describe(): readonly ServedSettingsRow[] } | undefined
+    if (settings === undefined) return undefined
+    const rows = settings.describe()
+    for (const id of PET_SETTINGS_ROW_IDS) {
+      const row = rows.find(candidate => candidate.ns === id)
+      if (row !== undefined) return row
+    }
+    return undefined
+  } catch {
+    return undefined
   }
 }
 
@@ -244,13 +330,21 @@ function applyImpl(ctx: Context, config: PetPluginConfig = {}): void {
     decorationEnabled: readLive(config.decorationEnabled, PET_FORM_DEFAULTS.decorationEnabled),
     registry,
   })
+  // The mirror back into the settings document (see syncSettingsFromPet) has to
+  // address the row that serves this plugin's config, which an aggregate bundle
+  // renames; the id is resolved lazily, once the composition serves it.
+  service.settingsNamespaceProvider = () => servedRow(ctx)?.ns
 
   // The effective settings ARE this row's own config: the Host serves one form
   // per profile entry from `Config` above, and every edit is committed into the
   // running config, so the plugin re-reads the section here instead of holding
   // a separate settings document (0.1.6 registered one through
-  // settings.installSection/register and re-resolved it on every change).
-  const current = (): PetSettingsSection => petSettingsSection(config, service.selectedPetId())
+  // settings.installSection/register and re-resolved it on every change). The
+  // display fields additionally read the persisted layout and the profile layer,
+  // so a mount with a config that never set them cannot reset a dragged
+  // position to the schema defaults (see displayField).
+  const current = (): PetSettingsSection =>
+    petSettingsSection(config, service.selectedPetId(), service.display(), servedRow(ctx)?.user)
   // The browser half talks to the pet through same-origin JSON endpoints and
   // loads each pet's atlas from the registry's own media route (RPC domains
   // are platform-registered, so the pet serves its own API — the same

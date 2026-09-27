@@ -300,6 +300,15 @@ export class PetService extends Service {
    * the same turn again after the pet is disabled and re-enabled.
    */
   private readonly officialEventSessions = new WeakSet<Session>()
+  /**
+   * Resolve the settings namespace this plugin's own config is served as, when
+   * the caller can read it off the composition. A plugin's settings ARE its own
+   * config, so the namespace is the row's id — and an aggregate bundle renames
+   * child rows (`pet` becomes `web-ui-pet`), which is why it cannot be assumed
+   * to be {@link PET_SETTINGS_NAMESPACE}. `apply` sets this; absent means the
+   * plugin runs outside a Loader and the package's own id stands.
+   */
+  settingsNamespaceProvider: (() => string | undefined) | undefined = undefined
 
   constructor(ctx: Context, config: PetConfig = {}) {
     super(ctx, 'pet')
@@ -836,8 +845,9 @@ export class PetService extends Service {
   private syncSettingsFromPet(): void {
     const settings = this.ctx.get('settings', false) as { update(ns: string, patch: object): Promise<void> } | undefined
     if (settings === undefined) return
+    const ns = this.settingsNamespaceProvider?.() ?? PET_SETTINGS_NAMESPACE
     const snapshot = this.ledger.snapshot
-    void settings.update(PET_SETTINGS_NAMESPACE, {
+    void settings.update(ns, {
       visible: snapshot.display.visible,
       size: snapshot.display.size,
       right: snapshot.display.right,
